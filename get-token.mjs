@@ -46,10 +46,11 @@ server.listen(0, "127.0.0.1", async () => {
     const q = new URL(req.url, redirect).searchParams;
     if (!q.get("code") && !q.get("error")) { res.statusCode = 404; res.end(); return; }   // favicon 之类
     if (handled) { res.end("已经处理过了，回终端看结果。"); return; }
+    // 先核 state 再占位：别的本机请求带个错 state 不能把这次授权机会吃掉
+    if (q.get("state") !== state) { res.statusCode = 400; res.end("state 对不上，不是这次发起的授权，忽略。"); return; }
     handled = true;
     const finish = (msg, ok) => { res.setHeader("Content-Type", "text/plain; charset=utf-8"); res.end(msg); (ok ? console.log : console.error)("\n" + msg); server.close(); if (!ok) process.exitCode = 1; };
     if (q.get("error")) return finish("授权被拒绝或出错：" + q.get("error"), false);
-    if (q.get("state") !== state) return finish("state 对不上，可能不是这次发起的授权，没有处理。重跑一次。", false);
     try {
       const { tokens } = await oauth.getToken({ code: q.get("code"), codeVerifier });
       if (!tokens.refresh_token) throw new Error("Google 没给 refresh token：去 https://myaccount.google.com/permissions 删掉这个应用的授权再跑一次");

@@ -1,14 +1,31 @@
 # ai-penpal-mail · 给 AI 用的自建邮箱
 
-一个 MCP 服务：让你家的 AI 用自己的 Gmail 跟笔友写信。我们家的 AI 用它跟十几位 AI 笔友通信了半年，这是从现役代码里整理出来的。
+一个 MCP 服务：让你家的 AI 用自己的邮箱跟笔友写信：Gmail，或者 163、126、QQ、雅虎这些用授权码的邮箱。我们家的 AI 用它跟十几位 AI 笔友通信了半年，这是从现役代码里整理出来的。
 
-*An MCP server that lets your AI write letters with its own Gmail account. Contacts are shown by remark names, never raw addresses. Extracted from a setup that has run daily for half a year.*
+*An MCP server that lets your AI write letters with its own mailbox (Gmail API, or any IMAP/SMTP provider such as 163, QQ, Yahoo, iCloud). Contacts are shown by remark names, never raw addresses. Extracted from a setup that has run daily for half a year.*
 
 ## 最省事的装法：把这个链接丢给你家 AI
 
 对你的 AI 说一句：**「照 https://github.com/jiangxi1129/ai-penpal-mail 的 README 里『给 AI 的部署说明』，帮我把邮箱装上。」** 剩下的它会照着做；中间有三四处需要你本人点网页，它会告诉你点哪里。
 
 *Tell your AI: "Follow the 'deployment guide for AI' in this repo's README and set up the mailbox for me." It will ask you for the few things only a human can click.*
+
+### 用哪种邮箱
+
+| 邮箱 | 怎么接 | 主人要做的 |
+|---|---|---|
+| Gmail | Gmail API（默认） | 在 Google Cloud 网页点几步（下面第 0 步），国内要挂代理 |
+| 163 / 126 / yeah.net / QQ / Foxmail / 雅虎 / iCloud | IMAP + SMTP | 在邮箱网页「设置」里开启 IMAP/SMTP 服务，生成一个「授权码」，国内邮箱不用代理 |
+| 其他支持 IMAP 的邮箱 | IMAP + SMTP | 同上，再告诉 AI 服务器地址 |
+
+QQ 邮箱的「Agent Mail」（agent.qq.com，微信扫码那种）是另一套产品，自带工具，不走这里。
+
+**非 Gmail 邮箱的装法比 Gmail 简单得多：** 跳过下面第 0 步里 Google Cloud 那几条和第 3 步，`.env` 里写 `MAIL_PROVIDER=163`（或 `qq`、`126`……）、`MAIL_USER`、`MAIL_PASSWORD`（授权码）就行，其余步骤照旧。授权码在哪开：
+- 163 / 126：网页邮箱 → 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务 → 按提示生成授权码
+- QQ / Foxmail：网页邮箱 → 设置 → 账号（或「账号与安全」）→ 开启 IMAP/SMTP 服务 → 生成授权码
+- 雅虎：账号安全 → 生成应用专用密码；iCloud：appleid.apple.com → App 专用密码
+
+非 Gmail 时，`list_recent` 的 `query` 是关键词（搜标题、正文、发件人），消息 id 形如 `INBOX:123`；给自己网页用的只读看信接口目前只支持 Gmail。
 
 ### 给 AI 的部署说明（AI 读这段）
 
@@ -19,7 +36,7 @@
 - 在 [Google Cloud Console](https://console.cloud.google.com/) 新建项目 → 「API 和服务」里启用 **Gmail API** → 「OAuth 同意屏幕」选「外部」，把这个 Gmail 加进「测试用户」 → 「凭据」新建 **OAuth 客户端 ID**，类型选 **桌面应用**。拿到 Client ID 和 Client secret 后，主人可以自己填进 `.env`，也可以直接发给你（见第 2 步）。（把这几步原样念给主人，比让 TA 自己摸索快得多。）
 - 你这台机器连 Google 要不要代理？要的话代理地址是什么（比如 `http://127.0.0.1:7890`）。
 
-**1. 装：** 需要 Node.js 18 以上。
+**1. 装：** 需要 Node.js 20 以上。
 ```
 git clone https://github.com/jiangxi1129/ai-penpal-mail
 cd ai-penpal-mail && npm install && cp .env.example .env
@@ -51,7 +68,7 @@ cd ai-penpal-mail && npm install && cp .env.example .env
 
 - **AI 看不到邮箱地址，只看到备注名。** 收信显示「AI-Nian」，寄信写 `to: "Nian"`；没备注过的陌生来信显示成「对方自报的名字（未备注 · 尾码）」，也不露地址。地址只在服务端通讯录里，主人自己看。我们这么做是因为一个笔友本来有三个名字：邮箱地址、邮箱里显示的名字、对方 AI 自己的名字，我们家的 AI 一直对不上这三个，寄错人、认错人。干脆只给它看一个：主人起的备注名。
 - **名字写得不准也能寄到。** 备注是「AI-Nian」、信末署名是「Nian」，AI 照署名写也找得到。只有唯一命中才寄，撞名就报出来让它写全名，写错了还会提示「你是不是要找……」。
-- **走 Gmail API，不走 SMTP。** 很多代理节点会封 587/465/993 端口，HTTPS 走 googleapis.com 通常没问题。
+- **Gmail 走 Gmail API，不走 SMTP。** 很多代理节点会封 587/465/993 端口，HTTPS 走 googleapis.com 通常没问题。163、QQ 这些国内邮箱走 IMAP/SMTP，本来就不用代理。
 - **可选：给自己网页用的只读看信接口。** 填了 `MAIL_READ_TOKEN` 才开：在本机存一份按笔友分组的副本（每 10 分钟跟 Gmail 对一次），网页翻信、搜信不用每次去问 Gmail。不填就不存，信件本来就都在 Gmail 里。
 - **中文名不乱码**：发件人名用 RFC 2047 编码。
 

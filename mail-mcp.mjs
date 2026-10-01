@@ -28,6 +28,7 @@ import { google } from "googleapis";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { resolve } from "node:path";
 import "dotenv/config";
+import { createImapBackend } from "./imap-backend.mjs";
 import {
   emptyMailArchive,
   listMailArchiveConversations,
@@ -55,7 +56,10 @@ const REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
 const MAIL_USER = process.env.MAIL_USER;
 const MAIL_FROM = process.env.MAIL_FROM || `${process.env.MAIL_FROM_NAME || ""} <${MAIL_USER}>`.trim();
 const PROXY = process.env.PROXY || null;
-const MISSING_ENV = ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "MAIL_USER"].filter((k) => !String(process.env[k] || "").trim());
+// 邮箱类型：gmail（默认，走 Gmail API）或 163 / 126 / qq / yahoo / icloud / imap（走 IMAP+SMTP + 授权码，见 imap-backend.mjs）
+const PROVIDER = String(process.env.MAIL_PROVIDER || "gmail").trim().toLowerCase();
+const IS_GMAIL = PROVIDER === "gmail";
+const MISSING_ENV = (IS_GMAIL ? ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "MAIL_USER"] : ["MAIL_USER", "MAIL_PASSWORD"]).filter((k) => !String(process.env[k] || "").trim());
 if (MISSING_ENV.length) {
   console.error(`[mail-mcp] 缺少必填环境变量：${MISSING_ENV.join(", ")}（照 .env.example 填）`);
   process.exit(1);
@@ -67,11 +71,8 @@ const MAIL_ARCHIVE_SINCE = process.env.MAIL_ARCHIVE_SINCE || "2026/01/01";
 const MAIL_ARCHIVE_SINCE_DASH = MAIL_ARCHIVE_SINCE.replace(/\//g, "-");
 const MAIL_ARCHIVE_INTERVAL_MS = 10 * 60 * 1000;
 
-if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
-  console.error("[mail-mcp] Missing GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN in .env");
-  console.error("[mail-mcp] Run `node gmail-auth.js` first to obtain a refresh token.");
-  process.exit(1);
-}
+const backend = IS_GMAIL ? null : createImapBackend({ provider: PROVIDER, user: MAIL_USER, password: process.env.MAIL_PASSWORD, from: MAIL_FROM, proxy: PROXY });
+if (backend) console.error(`[mail-mcp] 邮箱类型 ${backend.describe}`);
 
 // Configure global axios/gaxios agent so Gmail API calls go through PROXY when set
 // 刷新令牌那一步走 google-auth-library 自己的传输层，google.options 管不到；它认环境变量里的代理
@@ -139,12 +140,15 @@ function composeBody(body, signature) {
 /**
  * Build a simple text-only RFC822 message.
  */
-function buildSimpleMessage({ from, to, cc, bcc, subject, body, replyTo, inReplyTo, references }) {
+function buildSimpleMessage({ from, to, cc, bcc, subject, body, replyTo, inReplyTo, references, smtp = false }) {
+  const domain = String(MAIL_USER || "localhost").split("@").pop();
   const headers = [
+    smtp ? `Date: ${new Date().toUTCString().replace("GMT", "+0000")}` : null,
+    smtp ? `Message-ID: <${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}@${domain}>` : null,
     `From: ${encodeAddressHeader(from)}`,
     `To: ${encodeAddressHeader(to)}`,
     cc ? `Cc: ${encodeAddressHeader(cc)}` : null,
-    bcc ? `Bcc: ${encodeAddressHeader(bcc)}` : null,
+    bcc && !smtp ? `Bcc: ${encodeAddressHeader(bcc)}` : null,   // SMTP 直寄时密送只放信封，不进信头（不然收件人看得见）
     replyTo ? `Reply-To: ${encodeAddressHeader(replyTo)}` : null,
     `Subject: =?UTF-8?B?${Buffer.from(subject).toString("base64")}?=`,
     inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
@@ -196,6 +200,7 @@ function decodeBody(payload) {
 }
 
 async function listMessageSummaries(maxResults, labelIds, q) {
+  if (backend) return backend.listMessageSummaries(maxResults, !q, q);
   const list = await gmail.users.messages.list({ userId: "me", maxResults, ...(labelIds ? { labelIds } : {}), ...(q ? { q: `${q} -in:spam -in:trash` } : {}) });
   const items = list.data.messages || [];
   const messages = await Promise.all(items.map(async (m) => {
@@ -206,6 +211,7 @@ async function listMessageSummaries(maxResults, labelIds, q) {
 }
 
 async function readMessage(id) {
+  if (backend) return backend.readMessage(id);
   const res = await gmail.users.messages.get({ userId: "me", id, format: "full" });
   const summary = summarizeMessage(res.data);
   const { text, html } = decodeBody(res.data.payload);
@@ -661,13 +667,22 @@ function createServer() {
         cc: z.string().optional(),
         bcc: z.string().optional(),
         replyTo: z.string().optional(),
-        inReplyTo: z.string().optional().describe("Optional. The Gmail message id you are answering (the `id` from list_recent/get_message). The reply joins that conversation thread."),
+        inReplyTo: z.string().optional().describe("Optional. The message id you are answering (the `id` from list_recent/get_message). The reply joins that conversation thread."),
       },
     },
     async ({ to, subject, body, signature, cc, bcc, replyTo, inReplyTo }) => {
       const recipients = resolveRecipients(to);
       // 回信串线：AI 只给 Gmail 的 message id，这里替它查出原信的 Message-ID / References / threadId
       let thread = {};
+      if (backend) {
+        if (inReplyTo) thread = await backend.replyHeaders(inReplyTo);
+        const cc2 = resolveRecipients(cc), bcc2 = resolveRecipients(bcc);
+        const raw = buildSimpleMessage({ from: MAIL_FROM, to: recipients, cc: cc2, bcc: bcc2, replyTo: resolveRecipients(replyTo), subject,
+          body: composeBody(body, signature), inReplyTo: thread.inReplyTo, references: thread.references, smtp: true });
+        const envelope = { from: MAIL_USER, to: [...new Set(extractAddresses([recipients, cc2, bcc2].filter(Boolean).join(", ")))] };
+        const res = await backend.sendRaw(raw, envelope, extractAddresses(recipients));
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ack: res.ack, id: res.id }, null, 2) }] };
+      }
       if (inReplyTo) {
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(inReplyTo)) throw new Error("inReplyTo 要填 list_recent/get_message 给的 id");
         const orig = await gmail.users.messages.get({ userId: "me", id: inReplyTo, format: "metadata", metadataHeaders: ["Message-ID", "References"] });
@@ -703,7 +718,7 @@ function createServer() {
       inputSchema: {
         maxResults: z.number().int().min(1).max(50).optional().describe("Default 10 for unread, 30 when searching with query."),
         labelIds: z.array(z.string()).optional().default(["INBOX"]).describe("Default: INBOX. Without query, results are limited to unread messages."),
-        query: z.string().max(200).optional().describe("Optional Gmail search (e.g. subject:xxx, newer_than:7d). With a query, read messages are included too."),
+        query: z.string().max(200).optional().describe(IS_GMAIL ? "Optional Gmail search (e.g. subject:xxx, newer_than:7d). With a query, read messages are included too." : "Optional keyword: matches subject, body or sender. With a query, read messages are included too."),
       },
     },
     async ({ maxResults, labelIds, query }) => {
@@ -719,9 +734,9 @@ function createServer() {
     "get_message",
     {
       title: "Get Message",
-      description: "Fetch full content of a Gmail message by id. Contact identity uses remark names; email addresses and internal contact fields are hidden.",
+      description: "Fetch full content of a message by id. Contact identity uses remark names; email addresses and internal contact fields are hidden.",
       inputSchema: {
-        id: z.string().describe("Gmail message id (from list_recent)"),
+        id: z.string().describe("Message id (from list_recent)"),
       },
     },
     async ({ id }) => {
@@ -756,7 +771,7 @@ if (mode === "sse") {
     try { return await run(); } catch (e) { finish(); throw e; }
   }
 
-  const allowReadonly = (req) => MAIL_READ_TOKEN && req.headers.authorization === `Bearer ${MAIL_READ_TOKEN}`;
+  const allowReadonly = (req) => IS_GMAIL && MAIL_READ_TOKEN && req.headers.authorization === `Bearer ${MAIL_READ_TOKEN}`;   // 只读接口只支持 Gmail
   const readonlyHeaders = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
 
   app.get("/readonly/messages", async (req, res) => {
@@ -891,7 +906,8 @@ if (mode === "sse") {
     console.log(`[mail-mcp] from:    ${MAIL_FROM}`);
     console.log(`[mail-mcp] proxy:   ${PROXY ? "configured" : "direct"}`);
     // 本地存档只服务只读接口（给自己的网页按笔友分组看信、搜信）。没开只读接口就不存——Gmail 本身就有全部信件
-    if (MAIL_READ_TOKEN) { startMailArchive(); warmConversationIndex(); }
+    if (MAIL_READ_TOKEN && !IS_GMAIL) console.error("[mail-mcp] 只读看信接口目前只支持 Gmail，这次没开");
+    else if (MAIL_READ_TOKEN) { startMailArchive(); warmConversationIndex(); }
   });
 } else {
   const srv = createServer();

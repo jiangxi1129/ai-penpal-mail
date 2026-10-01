@@ -4,7 +4,7 @@
  *
  * 前提：.env 里已经填了 GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET（OAuth 客户端类型选「桌面应用 Desktop app」）。
  * 用法：node get-token.mjs
- *   1. 它打印一个链接，主人用 AI 那个 Gmail 账号在浏览器里打开、同意授权；
+ *   1. 脚本打印一个链接，人类用 AI 那个 Gmail 账号在浏览器里打开、同意授权；
  *   2. 浏览器跳回 http://127.0.0.1:<随机端口>/，这里收下授权码（带 state 校验和 PKCE）；
  *   3. 把 refresh token 写进 .env 的 GMAIL_REFRESH_TOKEN，.env 权限设成 600。终端不显示令牌本身。
  * 需要代理时 .env 里填 PROXY（授权码换令牌那一步也走代理）。
@@ -17,7 +17,7 @@ import "dotenv/config";
 const { GMAIL_CLIENT_ID: id, GMAIL_CLIENT_SECRET: secret, PROXY } = process.env;
 if (!id || !secret) { console.error("先在 .env 里填 GMAIL_CLIENT_ID 和 GMAIL_CLIENT_SECRET"); process.exit(1); }
 if (!existsSync(".env")) { console.error("没找到 .env：先 cp .env.example .env 并填好"); process.exit(1); }
-// 换令牌的请求走 google-auth-library 自己的传输层，google.options 管不到它；它认环境变量里的代理
+// 换令牌的请求走 google-auth-library 自己的传输层，google.options 管不到；这个库只认环境变量里的代理
 if (PROXY) { process.env.HTTPS_PROXY = PROXY; process.env.HTTP_PROXY = PROXY; }
 const { google } = await import("googleapis");
 const { HttpsProxyAgent } = await import("https-proxy-agent");

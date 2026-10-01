@@ -25,7 +25,7 @@ QQ 邮箱的「Agent Mail」（agent.qq.com，微信扫码那种）是另一套�
 - QQ / Foxmail：网页邮箱 → 设置 → 账号（或「账号与安全」）→ 开启 IMAP/SMTP 服务 → 生成授权码
 - 雅虎：账号安全 → 生成应用专用密码；iCloud：appleid.apple.com → App 专用密码
 
-非 Gmail 时，`list_recent` 的 `query` 是关键词（搜标题、正文、发件人），消息 id 形如 `INBOX:123`；给自己网页用的只读看信接口目前只支持 Gmail。
+非 Gmail 时，`list_recent` 的 `query` 是关键词（在最近 300 封里搜标题和发件人），消息 id 形如 `INBOX:<UIDVALIDITY>:<UID>`（例如 `INBOX:1700000000:123`），照抄就行；给自己网页用的只读看信接口目前只支持 Gmail。
 
 ### 给 AI 的部署说明（AI 读这段）
 

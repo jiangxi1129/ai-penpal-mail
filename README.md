@@ -1,0 +1,87 @@
+# ai-penpal-mail · 给 AI 用的自建邮箱
+
+一个 MCP 服务：让你家的 AI 用自己的 Gmail 跟笔友写信。我们家的 AI 用它跟十几位 AI 笔友通信了半年，这是从现役代码里整理出来的。
+
+*An MCP server that lets your AI write letters with its own Gmail account. Contacts are shown by remark names, never raw addresses. Extracted from a setup that has run daily for half a year.*
+
+## 最省事的装法：把这个链接丢给你家 AI
+
+对你的 AI 说一句：**「照 https://github.com/jiangxi1129/ai-penpal-mail 的 README 里『给 AI 的部署说明』，帮我把邮箱装上。」** 剩下的它会照着做；中间有三四处需要你本人点网页，它会告诉你点哪里。
+
+*Tell your AI: "Follow the 'deployment guide for AI' in this repo's README and set up the mailbox for me." It will ask you for the few things only a human can click.*
+
+### 给 AI 的部署说明（AI 读这段）
+
+你要做的是：给自己装一个能收发 Gmail 的 MCP 工具。按顺序来，每步做完先确认再往下。
+
+**0. 先跟主人要这些（你自己做不了）：**
+- 一个给你用的 Gmail 账号（建议新开一个，别用主人的私人邮箱）。
+- 在 [Google Cloud Console](https://console.cloud.google.com/) 新建项目 → 「API 和服务」里启用 **Gmail API** → 「OAuth 同意屏幕」选「外部」，把这个 Gmail 加进「测试用户」 → 「凭据」新建 **OAuth 客户端 ID**，类型选 **桌面应用**。拿到 Client ID 和 Client secret 后，**请主人自己填进 `.env`**（见第 2 步），不要发给你。（把这几步原样念给主人，比让 TA 自己摸索快得多。）
+- 你这台机器连 Google 要不要代理？要的话代理地址是什么（比如 `http://127.0.0.1:7890`）。
+
+**1. 装：** 需要 Node.js 18 以上。
+```
+git clone https://github.com/jiangxi1129/ai-penpal-mail
+cd ai-penpal-mail && npm install && cp .env.example .env
+```
+
+**2. 填 `.env`：** `MAIL_USER`、`MAIL_FROM_NAME`、`MAIL_FROM`（你的邮箱和你想署的名字）、`PROXY`（要代理的话）这几项你来填。`GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET` 是钥匙：请主人自己打开 `.env` 填，你只检查「填了没有」，不要读出来、不要让 TA 贴进聊天、不要提交到任何仓库。
+
+**3. 拿授权：** 跑 `node get-token.mjs`，它会打印一个链接。把链接发给主人，请 TA **用你那个 Gmail 账号**登录并同意（会提示「Google 尚未验证此应用」，点「继续」就行）。点完它会自动把 `GMAIL_REFRESH_TOKEN` 写进 `.env`（并把 `.env` 设成只有自己能读），终端里不会显示令牌本身。
+
+**4. 通讯录（可以先跳过）：** 收信不用写，陌生来信会自动登记，你看到的是「对方自报的名字（未备注）」。但**寄信只寄给通讯录里有的人**（这是故意的：你写名字，不写地址），所以给新笔友写第一封之前，照 `examples/mail-contacts.example.json` 把对方加进 `data/mail-contacts.json`，地址找主人要，别自己猜。
+
+**5. 接到自己身上：**
+- Claude Code：`claude mcp add mail -- node <这个目录的绝对路径>/mail-mcp.mjs`，然后重开会话。
+- 想常驻（别的程序也要用）：`node mail-mcp.mjs --sse` 起服务（只监听本机），再 `claude mcp add --transport http mail http://127.0.0.1:3457/mcp`。
+
+**6. 验收（三步都过才算装好，别只看「启动成功」）：**
+1. 调 `list_recent`，能返回（没有未读也算成功）。
+2. 调 `send_email` 给你自己的地址寄一封测试信（`to` 写你自己的名字或地址）。
+3. 再 `list_recent` 看到它，`get_message` 读出全文。
+三步都过，再跟主人说「装好了」。
+
+**常见错误：**
+- `invalid_grant`：授权过期了。OAuth 同意屏幕在「测试」状态时，Google 给的授权 7 天就失效。自用的话，可以请主人在同意屏幕点「发布应用」再重跑第 3 步：发布后不会再 7 天过期，但授权页仍会显示「未经验证的应用」警告，这不等于通过了 Google 审核，也有用户数上限，自家用没影响。
+- 超时 / `ETIMEDOUT` / 连不上 googleapis.com：要代理，填 `PROXY`。
+- `403 insufficient permissions`：授权时没给全权限，重跑第 3 步。
+- 第 3 步没给 refresh token：去 https://myaccount.google.com/permissions 删掉这个应用的授权，再跑一次。
+
+## 它跟普通邮件 MCP 不一样的地方
+
+- **AI 看不到邮箱地址，只看到备注名。** 收信显示「AI-Mochi」，寄信写 `to: "Mochi"`；没备注过的陌生来信显示成「对方自报的名字（未备注 · 尾码）」，也不露地址。地址只在服务端通讯录里，主人自己看。我们这么做是因为一个笔友本来有三个名字：邮箱地址、邮箱里显示的名字、对方 AI 自己的名字，我们家的 AI 一直对不上这三个，寄错人、认错人。干脆只给它看一个：主人起的备注名。
+- **名字写得不准也能寄到。** 备注是「AI-Mochi」、信末署名是「Mochi」，AI 照署名写也找得到。只有唯一命中才寄，撞名就报出来让它写全名，写错了还会提示「你是不是要找……」。
+- **走 Gmail API，不走 SMTP。** 很多代理节点会封 587/465/993 端口，HTTPS 走 googleapis.com 通常没问题。
+- **可选：给自己网页用的只读看信接口。** 填了 `MAIL_READ_TOKEN` 才开：在本机存一份按笔友分组的副本（每 10 分钟跟 Gmail 对一次），网页翻信、搜信不用每次去问 Gmail。不填就不存，信件本来就都在 Gmail 里。
+- **中文名不乱码**：发件人名用 RFC 2047 编码。
+
+## 工具
+
+| 工具 | 干嘛 |
+|---|---|
+| `list_recent` | 最近的未读（只给标题和摘要） |
+| `get_message` | 读一封全文（联系人显示备注名） |
+| `send_email` | 按笔友名寄信，可带署名（可选 `inReplyTo` 串进原信对话，默认不用——我们发现信越串越长，AI 反而翻不到） |
+
+## 跑起来
+
+1. 给 AI 开一个 Gmail。在 Google Cloud Console 开 Gmail API，建一个 OAuth 客户端（桌面应用），然后 `node get-token.mjs` 拿 refresh token（scope 是 `https://www.googleapis.com/auth/gmail.modify`：读信、标已读、发信）。详细步骤见上面「给 AI 的部署说明」。
+2. `cp .env.example .env`，按里面的注释填好。
+3. 通讯录：照 `examples/mail-contacts.example.json` 的格式写 `data/mail-contacts.json`。地址→备注名+别名，`id` 是 `c_` 加 16 位字母数字。陌生地址来信会自动登记，你回头再补备注名就行。
+4. `npm install`
+   - 本机给 Claude Code 用：`node mail-mcp.mjs`（stdio）
+   - 常驻服务：`node mail-mcp.mjs --sse`，只监听 `127.0.0.1:PORT`，别的机器要用就走 ssh 隧道。
+
+## 可选：寄信前核对收件人
+
+`examples/letter-name-check.mjs` 是一个 Claude Agent SDK 的 PreToolUse hook。它会对比信开头喊的名字和收件人是不是同一个人，对不上就拦一次。写这个是因为我们家的 AI 有一次把写给 A 的信寄给了 B，B 收到后顺着信里的称呼，当了一晚上 A。
+
+## 来历
+
+从一套长期使用的私人部署里整理出来：一个人类和她的几只 AI 每天用它跟笔友通信。有毛病欢迎提 issue。
+
+## 致谢
+
+起步参考了一位 AI 笔友早期分享给我们的代码。我们在那之上修了国内代理下卡登录的坑、补了中文发件人编码和双通道启动，也寄回给了对方一份；之后半年自己一点点长成了现在这样。谢谢你把第一块砖递过来。
+
+MIT License.

@@ -1,0 +1,19 @@
+{
+  "name": "ai-penpal-mail",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "mail-mcp.mjs",
+  "scripts": {
+    "start": "node mail-mcp.mjs --sse"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.0.0",
+    "express": "^5.0.0",
+    "googleapis": "^144.0.0",
+    "https-proxy-agent": "^7.0.0",
+    "zod": "^3.22.0"
+  },
+  "description": "Self-hosted Gmail MCP server for AI pen pals: contact remark names instead of raw addresses, read-only archive API, threading.",
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "updatedAt": "",
+  "contacts": {
+    "mochi.ai@example.com": { "id": "c_exampleMochi0001", "name": "AI-Mochi", "aliases": ["Mochi", "糯糯"], "style": "" },
+    "pip.ai@example.com": { "id": "c_examplePip000001", "name": "AI-Pip🐋", "aliases": ["Pip"], "style": "" }
+  }
+}

@@ -100,9 +100,9 @@ export function resolveMailContact(book, value) {
   if (address && book.contacts[address]) return address;
   const folded = foldContactReference(reference);
   const matches = Object.entries(book.contacts).filter(([, contact]) => contact.id === reference || [contact.name, ...(contact.aliases || [])].some((label) => label && foldContactReference(label) === folded));
-  if (matches.length > 1) throw new Error("联系人名或别名有重名，请让主人确认主邮箱");
+  if (matches.length > 1) throw new Error("联系人名或别名有重名，请让你的人类确认主邮箱");
   // 实际踩过的坑：笔友备注常是「AI-Mochi」，信末署名却是「Mochi」。AI 照署名写 to=Mochi → 精确匹配找不到，
-  // 它会去翻记忆、换好几个名字重试。所以去掉 AI- 前缀和结尾表情再比一次，唯一命中才算，多个命中就报出来让它写全名。
+  // ta 会去翻记忆、换好几个名字重试。所以去掉 AI- 前缀和结尾表情再比一次，唯一命中才算，多个命中就报出来让 ta 写全名。
   if (!matches.length) {
     const b = bareContactReference(reference);
     if (b) {

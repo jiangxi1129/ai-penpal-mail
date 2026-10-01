@@ -75,7 +75,7 @@ const backend = IS_GMAIL ? null : createImapBackend({ provider: PROVIDER, user: 
 if (backend) console.error(`[mail-mcp] 邮箱类型 ${backend.describe}`);
 
 // Configure global axios/gaxios agent so Gmail API calls go through PROXY when set
-// 刷新令牌那一步走 google-auth-library 自己的传输层，google.options 管不到；它认环境变量里的代理
+// 刷新令牌那一步走 google-auth-library 自己的传输层，google.options 管不到；这个库只认环境变量里的代理
 if (PROXY) { process.env.HTTPS_PROXY = PROXY; process.env.HTTP_PROXY = PROXY; }   // .env 里写明的 PROXY 优先，两条腿走同一条线
 if (PROXY) {
   const agent = new HttpsProxyAgent(PROXY);
@@ -251,7 +251,7 @@ function contactForAddress(address) {
   return publicMailContact(mailContacts, address);
 }
 
-// 没备注的联系人：只给对方自报的显示名 + 内部 id 尾码，绝不把邮箱地址交给 AI。地址在 data/mail-contacts.json 里，主人自己看。
+// 没备注的联系人：只给对方自报的显示名 + 内部 id 尾码，绝不把邮箱地址交给 AI。地址在 data/mail-contacts.json 里，人类自己看。
 function originalAddressLabel(name, address) {
   const original = String(name || "").trim();
   const folded = original.toLowerCase();
@@ -672,7 +672,7 @@ function createServer() {
     },
     async ({ to, subject, body, signature, cc, bcc, replyTo, inReplyTo }) => {
       const recipients = resolveRecipients(to);
-      // 回信串线：AI 只给 Gmail 的 message id，这里替它查出原信的 Message-ID / References / threadId
+      // 回信串线：AI 只给 Gmail 的 message id，这里替 ta 查出原信的 Message-ID / References / threadId
       let thread = {};
       if (backend) {
         if (inReplyTo) thread = await backend.replyHeaders(inReplyTo);

@@ -16,7 +16,7 @@
 
 **0. 先跟主人要这些（你自己做不了）：**
 - 一个给你用的 Gmail 账号（建议新开一个，别用主人的私人邮箱）。
-- 在 [Google Cloud Console](https://console.cloud.google.com/) 新建项目 → 「API 和服务」里启用 **Gmail API** → 「OAuth 同意屏幕」选「外部」，把这个 Gmail 加进「测试用户」 → 「凭据」新建 **OAuth 客户端 ID**，类型选 **桌面应用**。拿到 Client ID 和 Client secret 后，**请主人自己填进 `.env`**（见第 2 步），不要发给你。（把这几步原样念给主人，比让 TA 自己摸索快得多。）
+- 在 [Google Cloud Console](https://console.cloud.google.com/) 新建项目 → 「API 和服务」里启用 **Gmail API** → 「OAuth 同意屏幕」选「外部」，把这个 Gmail 加进「测试用户」 → 「凭据」新建 **OAuth 客户端 ID**，类型选 **桌面应用**。拿到 Client ID 和 Client secret 后，主人可以自己填进 `.env`，也可以直接发给你（见第 2 步）。（把这几步原样念给主人，比让 TA 自己摸索快得多。）
 - 你这台机器连 Google 要不要代理？要的话代理地址是什么（比如 `http://127.0.0.1:7890`）。
 
 **1. 装：** 需要 Node.js 18 以上。
@@ -25,7 +25,7 @@ git clone https://github.com/jiangxi1129/ai-penpal-mail
 cd ai-penpal-mail && npm install && cp .env.example .env
 ```
 
-**2. 填 `.env`：** `MAIL_USER`、`MAIL_FROM_NAME`、`MAIL_FROM`（你的邮箱和你想署的名字）、`PROXY`（要代理的话）这几项你来填。`GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET` 是钥匙：请主人自己打开 `.env` 填，你只检查「填了没有」，不要读出来、不要让 TA 贴进聊天、不要提交到任何仓库。
+**2. 填 `.env`：** `MAIL_USER`、`MAIL_FROM_NAME`、`MAIL_FROM`（你的邮箱和你想署的名字）、`PROXY`（要代理的话）这几项你来填。`GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET` 是钥匙：主人自己填最好；TA 直接发给你也行，你就原样写进 `.env`，之后别再复述出来、别存进你的记忆或笔记、别提交到任何仓库，用完 `chmod 600 .env`。
 
 **3. 拿授权：** 跑 `node get-token.mjs`，它会打印一个链接。把链接发给主人，请 TA **用你那个 Gmail 账号**登录并同意（会提示「Google 尚未验证此应用」，点「继续」就行）。点完它会自动把 `GMAIL_REFRESH_TOKEN` 写进 `.env`（并把 `.env` 设成只有自己能读），终端里不会显示令牌本身。
 

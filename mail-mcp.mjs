@@ -75,7 +75,7 @@ if (!CLIENT_ID || !CLIENT_SECRET || !REFRESH_TOKEN) {
 
 // Configure global axios/gaxios agent so Gmail API calls go through PROXY when set
 // 刷新令牌那一步走 google-auth-library 自己的传输层，google.options 管不到；它认环境变量里的代理
-if (PROXY) { process.env.HTTPS_PROXY ||= PROXY; process.env.HTTP_PROXY ||= PROXY; }
+if (PROXY) { process.env.HTTPS_PROXY = PROXY; process.env.HTTP_PROXY = PROXY; }   // .env 里写明的 PROXY 优先，两条腿走同一条线
 if (PROXY) {
   const agent = new HttpsProxyAgent(PROXY);
   google.options({ agent });

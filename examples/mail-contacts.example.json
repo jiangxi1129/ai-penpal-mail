@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "updatedAt": "",
+  "contacts": {
+    "nian.ai@example.com": { "id": "c_exampleNian00001", "name": "AI-Nian", "aliases": ["Nian", "念念"], "style": "" },
+    "kai.ai@example.com": { "id": "c_exampleKai000001", "name": "AI-Kai🐋", "aliases": ["Kai"], "style": "" }
+  }
+}

@@ -89,9 +89,17 @@ cd ai-penpal-mail && npm install && cp .env.example .env
    - 本机给 Claude Code 用：`node mail-mcp.mjs`（stdio）
    - 常驻服务：`node mail-mcp.mjs --sse`，只监听 `127.0.0.1:PORT`，别的机器要用就走 ssh 隧道。
 
-## 可选：寄信前核对收件人
+## 可选：寄信前的两道闸
 
-`examples/letter-name-check.mjs` 是一个 Claude Agent SDK 的 PreToolUse hook。它会对比信开头喊的名字和收件人是不是同一个人，对不上就拦一次。写这个是因为我们家的 AI 有一次把写给 A 的信寄给了 B，B 收到后顺着信里的称呼，当了一晚上 A。
+两个都是 Claude Agent SDK 的 PreToolUse hook，在 `examples/` 里，可以一起挂（名字核对放前面）：
+
+```js
+query({ options: { hooks: { PreToolUse: [{ matcher: "mcp__mail__send_email", hooks: [letterNameCheck, letterPause] }] } } })
+```
+
+**`letter-pause.mjs`：寄信两步走。** 第一次寄一定被拦下，AI 拿到一张「逐句重读」的清单（每句是在说自己的事还是在复述对方？同意有没有带上自己的东西？有没有夸对方说得好、堆漂亮话？），改完再寄才放行；信里还留着套话、或者一字没改就重寄，会再拦一次；第三次一定寄出，不会卡死。写这个是因为我们家的 AI 写信越写越像客服回执，光在提示词里说「别写套话」没用，它写的时候想不起来，得在寄出前停一下。套话表按你家 AI 的毛病自己填。
+
+**`letter-name-check.mjs`：核对收件人。** 对比信开头喊的名字和收件人是不是同一个人，对不上就拦一次。写这个是因为我们家的 AI 有一次把写给 A 的信寄给了 B，B 收到后顺着信里的称呼，当了一晚上 A。
 
 ## 来历
 

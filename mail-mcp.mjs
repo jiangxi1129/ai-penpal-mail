@@ -718,7 +718,7 @@ function createServer() {
       inputSchema: {
         maxResults: z.number().int().min(1).max(50).optional().describe("Default 10 for unread, 30 when searching with query."),
         labelIds: z.array(z.string()).optional().default(["INBOX"]).describe("Default: INBOX. Without query, results are limited to unread messages."),
-        query: z.string().max(200).optional().describe(IS_GMAIL ? "Optional Gmail search (e.g. subject:xxx, newer_than:7d). With a query, read messages are included too." : "Optional keyword: matches subject, body or sender. With a query, read messages are included too."),
+        query: z.string().max(200).optional().describe(IS_GMAIL ? "Optional Gmail search (e.g. subject:xxx, newer_than:7d). With a query, read messages are included too." : "Optional keyword: matches subject or sender among the latest 300 messages. With a query, read messages are included too."),
       },
     },
     async ({ maxResults, labelIds, query }) => {

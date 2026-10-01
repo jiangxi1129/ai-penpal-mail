@@ -75,11 +75,24 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     };
   }
 
-  // 未读（或带 query 时按正文/标题搜，含已读），新的在前
+  // 未读（或带 query 时在最近 300 封里按标题/发件人搜，含已读），新的在前
   async function listMessageSummaries(maxResults, unreadOnly, query) {
     return withInbox(async (client, uv) => {
-      const criteria = query ? { or: [{ subject: query }, { body: query }, { from: query }] } : (unreadOnly ? { seen: false } : { all: true });
-      const uids = (await client.search(criteria, { uid: true })) || [];
+      // 关键词搜索不交给服务器：163 的 IMAP 对标题/发件人/正文搜索一律返回空（10/2 实测），只认已读未读和日期。
+      // 所以有 query 时取最近 300 封的信封，在这边按标题和发件人（名字或地址）过滤。
+      if (query) {
+        const all = ((await client.search({ all: true }, { uid: true })) || []).sort((a, b) => b - a).slice(0, 300);
+        const q = String(query).toLowerCase();
+        const hits = [];
+        if (all.length) for await (const msg of client.fetch(all, { envelope: true, flags: true, internalDate: true }, { uid: true })) {
+          const e = msg.envelope || {};
+          const hay = [e.subject, ...(e.from || []).flatMap((a) => [a.name, a.address])].filter(Boolean).join(" ").toLowerCase();
+          if (hay.includes(q)) hits.push(summary(msg, uv));
+        }
+        hits.sort((a, b) => Number(b.internalDate) - Number(a.internalDate));
+        return { messages: hits.slice(0, maxResults), total: hits.length };
+      }
+      const uids = (await client.search(unreadOnly ? { seen: false } : { all: true }, { uid: true })) || [];
       const pick = uids.sort((a, b) => b - a).slice(0, maxResults);
       const messages = [];
       if (pick.length) for await (const msg of client.fetch(pick, { envelope: true, flags: true, internalDate: true }, { uid: true })) messages.push(summary(msg, uv));
@@ -125,19 +138,33 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     let ack = false;
     try {
       await withClient(async (client) => {
-        if (env.SAVE_SENT !== "false" && !/qq\.com|foxmail/.test(smtpHost)) {   // QQ 用 SMTP 寄的信会自己进已发送，再放一份就重了
+        if (env.SAVE_SENT !== "false") {
           try {
             const boxes = await client.list();
             const sent = boxes.find((b) => b.specialUse === "\\Sent") || boxes.find((b) => /^(sent|sent messages|sent items|已发送)$/i.test(b.name));
-            if (sent) await client.append(sent.path, rawMime, ["\\Seen"]);
+            if (sent) {
+              // 有的邮箱（163 实测时有时无）SMTP 寄出会自己存一份到已发送：等两秒看看最近几封里有没有同一个 Message-ID，有就不重复放
+              const mid = (/^Message-ID:\s*(<[^>]+>)/im.exec(rawMime) || [])[1] || info.messageId;
+              await new Promise((r) => setTimeout(r, 2000));
+              let exists = false;
+              const lk = await client.getMailboxLock(sent.path, { readOnly: true });
+              try {
+                const total = client.mailbox?.exists || 0;
+                if (total && mid) for await (const m of client.fetch(`${Math.max(1, total - 9)}:*`, { envelope: true })) if (m.envelope?.messageId === mid) exists = true;
+              } finally { lk.release(); }
+              if (!exists) await client.append(sent.path, rawMime, ["\\Seen"]);
+            }
           } catch (e) { console.error(`[mail-mcp] 已寄出，但往「已发送」放副本失败：${e?.message || e}`); }
         }
         const lock = await client.getMailboxLock("INBOX");
         try {
-          for (const a of ackAddresses) {
-            const uids = (await client.search({ seen: false, from: a }, { uid: true })) || [];
-            if (uids.length) await client.messageFlagsAdd(uids, ["\\Seen"], { uid: true });
-          }
+          // 同上，163 不认 FROM 搜索：先拿全部未读，在这边按发件地址挑
+          const want = new Set(ackAddresses.map((a) => String(a).toLowerCase()));
+          const unseen = want.size ? ((await client.search({ seen: false }, { uid: true })) || []) : [];
+          const mark = [];
+          if (unseen.length) for await (const msg of client.fetch(unseen, { envelope: true }, { uid: true }))
+            if ((msg.envelope?.from || []).some((a) => want.has(String(a.address || "").toLowerCase()))) mark.push(msg.uid);
+          if (mark.length) await client.messageFlagsAdd(mark, ["\\Seen"], { uid: true });
           ack = true;
         } finally { lock.release(); }
       });

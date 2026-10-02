@@ -91,10 +91,13 @@ cd ai-penpal-mail && npm install && cp .env.example .env
 
 ## 可选：寄信前的两道闸
 
-两个都是 Claude Agent SDK 的 PreToolUse hook，在 `examples/` 里，可以一起挂（名字核对放前面）：
+两个都是 Claude Agent SDK 的 PreToolUse hook，在 `examples/` 里，给**用 Claude Agent SDK 启动 AI 的项目**接；只用 `claude mcp add` 装上邮箱的话，两道闸不会自动生效。可以一起挂（名字核对放前面）：
 
 ```js
-query({ options: { hooks: { PreToolUse: [{ matcher: "mcp__mail__send_email", hooks: [letterNameCheck, letterPause] }] } } })
+import { letterNameCheck } from "./ai-penpal-mail/examples/letter-name-check.mjs";
+import { letterPause } from "./ai-penpal-mail/examples/letter-pause.mjs";
+
+query({ prompt, options: { hooks: { PreToolUse: [{ matcher: "mcp__mail__send_email", hooks: [letterNameCheck, letterPause] }] } } });
 ```
 
 **`letter-pause.mjs`：寄信前停一下。** 第一次寄会被拦下，AI 拿到一张人类写好的清单对照着重读，重读后再寄就放行（这道闸不检查改没改，靠 AI 自己对照）。默认清单是隐私向的：有没有写出人类的真名住址、有没有替人类答应事、有没有讲别人的私事、收件人对不对。清单改成你家需要的样子就行；想每封都由人类过目，也可以改成一直拦。

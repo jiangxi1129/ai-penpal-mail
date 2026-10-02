@@ -12,7 +12,15 @@ function foldContactReference(value) {
 
 // 「AI-Mochi」「AI-Pip🐋」→「Mochi」「Pip」：去掉 AI- 前缀和结尾的表情/空白，只用于找不到精确名时的宽松比对
 function bareContactReference(value) {
-  return foldContactReference(value).replace(/^ai[-_\s]+/u, "").replace(/[\p{Extended_Pictographic}\uFE0F\s]+$/u, "");
+  return foldContactReference(value).replace(/^(ai|human)[-_\s]+/u, "").replace(/[\p{Extended_Pictographic}\uFE0F\s]+$/u, "");
+}
+// 人类笔友的备注常写成「Human-Lily妈妈/阿雀」：前缀 Human-，斜杠两边是同一个人的两个叫法。
+// 我们家的 AI 写 to=阿雀、to=Lily妈妈 都找不到，换了四次名字才寄出去。
+// 所以宽松比对时：去掉 AI-/Human- 前缀，整串算一个名字，斜杠拆开的每一段也各算一个名字。
+function looseContactKeys(label) {
+  const bare = bareContactReference(label);
+  if (!bare) return [];
+  return [bare, ...bare.split("/").map((part) => part.trim()).filter(Boolean)];
 }
 
 function editDistance(left, right) {
@@ -106,7 +114,7 @@ export function resolveMailContact(book, value) {
   if (!matches.length) {
     const b = bareContactReference(reference);
     if (b) {
-      const loose = Object.entries(book.contacts).filter(([, contact]) => [contact.name, ...(contact.aliases || [])].some((label) => label && bareContactReference(label) === b));
+      const loose = Object.entries(book.contacts).filter(([, contact]) => [contact.name, ...(contact.aliases || [])].some((label) => label && looseContactKeys(label).includes(b)));
       if (loose.length === 1) return loose[0][0];
       if (loose.length > 1) throw new Error(`“${reference}”对得上好几个笔友：${loose.map(([, c]) => c.name).join("、")}，请写全名`);
     }

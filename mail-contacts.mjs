@@ -109,6 +109,14 @@ export function resolveMailContact(book, value) {
   const folded = foldContactReference(reference);
   const matches = Object.entries(book.contacts).filter(([, contact]) => contact.id === reference || [contact.name, ...(contact.aliases || [])].some((label) => label && foldContactReference(label) === folded));
   if (matches.length > 1) throw new Error("联系人名或别名有重名，请让你的人类确认主邮箱");
+  // Name/alias exact hits are checked against slash-segment hits on other contacts too:
+  // contact A named "Wren" and contact B named "Human-Lily's mom/Wren" both answer to "Wren", so refuse instead of guessing.
+  // Internal ids and email addresses still win outright.
+  if (matches.length === 1 && matches[0][1].id !== reference) {
+    const b = bareContactReference(reference);
+    const loose = !b ? [] : Object.entries(book.contacts).filter(([addr, contact]) => addr !== matches[0][0] && [contact.name, ...(contact.aliases || [])].some((label) => label && looseContactKeys(label).includes(b)));
+    if (loose.length) throw new Error(`“${reference}”对得上好几个笔友：${[matches[0], ...loose].map(([, c]) => c.name).join("、")}，请写全名`);
+  }
   // 实际踩过的坑：笔友备注常是「AI-Mochi」，信末署名却是「Mochi」。AI 照署名写 to=Mochi → 精确匹配找不到，
   // ta 会去翻记忆、换好几个名字重试。所以去掉 AI- 前缀和结尾表情再比一次，唯一命中才算，多个命中就报出来让 ta 写全名。
   if (!matches.length) {

@@ -45,6 +45,7 @@ import {
   resolveMailContact,
   saveMailContacts,
 } from "./mail-contacts.mjs";
+import { assertThreadRecipients, decodeMessageBody, headersObject, isUnusableReplyTarget, looksLikeReply, markReplyRead, pickReplyTarget, replyBaseSubject } from "./mail-safety.mjs";
 
 // ═══════════════════════════════════════════════════════════════
 // Config
@@ -182,23 +183,6 @@ function summarizeMessage(msg) {
   };
 }
 
-function decodeBody(payload) {
-  // Walks parts to find text/plain, falls back to text/html
-  let text = "";
-  let html = "";
-  const walk = (part) => {
-    if (!part) return;
-    if (part.body?.data) {
-      const decoded = Buffer.from(part.body.data, "base64").toString("utf8");
-      if (part.mimeType === "text/plain") text = text || decoded;
-      else if (part.mimeType === "text/html") html = html || decoded;
-    }
-    for (const p of part.parts || []) walk(p);
-  };
-  walk(payload);
-  return { text, html };
-}
-
 async function listMessageSummaries(maxResults, labelIds, q) {
   if (backend) return backend.listMessageSummaries(maxResults, !q, q);
   const list = await gmail.users.messages.list({ userId: "me", maxResults, ...(labelIds ? { labelIds } : {}), ...(q ? { q: `${q} -in:spam -in:trash` } : {}) });
@@ -214,7 +198,7 @@ async function readMessage(id) {
   if (backend) return backend.readMessage(id);
   const res = await gmail.users.messages.get({ userId: "me", id, format: "full" });
   const summary = summarizeMessage(res.data);
-  const { text, html } = decodeBody(res.data.payload);
+  const body = await decodeMessageBody(gmail, id, res.data.payload);
   const attachments = [];
   const walk = (part) => {
     if (!part) return;
@@ -222,7 +206,7 @@ async function readMessage(id) {
     for (const child of part.parts || []) walk(child);
   };
   walk(res.data.payload);
-  return { ...summary, text, html: html || null, attachments };
+  return { ...summary, text: body.text, bodyTruncated: body.bodyTruncated, bodyUnavailable: body.bodyUnavailable, attachments };
 }
 
 function extractAddresses(value) {
@@ -280,11 +264,13 @@ function publicMessage(message) {
     internalDate: message.internalDate,
   };
   if (Object.hasOwn(message, "text")) result.text = replaceMailAddresses(message.text, mailContacts);
-  if (Object.hasOwn(message, "html")) result.html = message.html ? replaceMailAddresses(message.html, mailContacts) : null;
+  if (Object.hasOwn(message, "bodyTruncated")) result.bodyTruncated = Boolean(message.bodyTruncated);
+  if (Object.hasOwn(message, "bodyUnavailable")) result.bodyUnavailable = Boolean(message.bodyUnavailable);
   if (Array.isArray(message.attachments)) {
     result.attachments = message.attachments.map((attachment) => ({
-      ...attachment,
       filename: replaceMailAddresses(attachment?.filename, mailContacts),
+      mimeType: attachment?.mimeType || "application/octet-stream",
+      size: Number.isFinite(attachment?.size) ? attachment.size : 0,
     }));
   }
   return result;
@@ -575,31 +561,19 @@ async function currentUnreadCounts() {
   return unreadSnapshotPromise;
 }
 
-async function acknowledgeSentMail(recipients, messageIds = []) {
-  const addresses = [...new Set(extractAddresses(recipients))];
-  const ids = new Set(messageIds.filter(Boolean));
+async function acknowledgeReply(messageId, addresses = []) {
   try {
-    for (const address of addresses) {
-      let pageToken = "";
-      do {
-        const request = { userId: "me", labelIds: ["UNREAD"], q: `from:${address} -in:spam -in:trash`, maxResults: 100 };
-        if (pageToken) request.pageToken = pageToken;
-        const page = await gmail.users.messages.list(request);
-        for (const message of page.data.messages || []) ids.add(message.id);
-        pageToken = page.data.nextPageToken || "";
-      } while (pageToken);
-    }
-    const allIds = [...ids];
-    for (let offset = 0; offset < allIds.length; offset += 1000) {
-      await gmail.users.messages.batchModify({ userId: "me", requestBody: { ids: allIds.slice(offset, offset + 1000), removeLabelIds: ["UNREAD"] } });
-    }
+    await markReplyRead(gmail, messageId);
     const counts = new Map(unreadSnapshot.counts);
-    for (const address of addresses) counts.delete(address);
+    for (const address of addresses) {
+      const n = counts.get(address) || 0;
+      if (n <= 1) counts.delete(address); else counts.set(address, n - 1);
+    }
     unreadSnapshotGeneration += 1;
     unreadSnapshot = { expiresAt: 0, counts };
     return true;
   } catch (error) {
-    console.error(`[mail-mcp] 寄出后清对方未读失败：${error?.message || error}`);
+    console.error(`[mail-mcp] 寄出后确认原信失败：${error?.message || error}`);
     unreadSnapshotGeneration += 1;
     unreadSnapshot = { expiresAt: 0, counts: new Map(unreadSnapshot.counts) };
     return false;
@@ -653,6 +627,26 @@ async function listConversationMessages(address, maxResults, pageToken) {
 function createServer() {
   const server = new McpServer({ name: "mail-mcp", version: "2.0.0" });
 
+  // 这个收件人发来的未读里，挑标题跟这封回信对得上的最新一封（Gmail 和 IMAP 两种邮箱都走这里）。
+  // 没翻完就找不到的时候抛错，调用方会在回执里写 replyInferenceFailed，不假装「确实没有这封」。
+  async function findUnreadReplyTarget(address, subject) {
+    if (backend) {
+      const want = replyBaseSubject(subject);
+      const r = await backend.findUnreadFrom(address, (s) => replyBaseSubject(s) === want);
+      if (!r.message && r.truncated) throw new Error(`未读太多（${r.total} 封），只翻了最新 1000 封，没找到这封回信对应的原信`);
+      return r.message ? { id: r.message.id, subject: r.message.subject, internalDate: r.message.internalDate } : null;
+    }
+    const list = await gmail.users.messages.list({ userId: "me", q: `from:${address} is:unread in:inbox`, maxResults: 20 });
+    const candidates = [];
+    for (const m of list.data.messages || []) {
+      const d = await gmail.users.messages.get({ userId: "me", id: m.id, format: "metadata", metadataHeaders: ["Subject"] });
+      candidates.push({ id: d.data.id || m.id, subject: headersObject(d.data.payload).subject, internalDate: d.data.internalDate });
+    }
+    const best = pickReplyTarget(candidates, subject);
+    if (!best && list.data.nextPageToken) throw new Error("这个人的未读超过 20 封，只翻了最新 20 封，没找到这封回信对应的原信");
+    return best;
+  }
+
   // ─── send_email ──────────────────────────────────────────────
   server.registerTool(
     "send_email",
@@ -667,35 +661,70 @@ function createServer() {
         cc: z.string().optional(),
         bcc: z.string().optional(),
         replyTo: z.string().optional(),
-        inReplyTo: z.string().optional().describe("Optional. The message id you are answering (the `id` from list_recent/get_message). The reply joins that conversation thread."),
+        inReplyTo: z.string().optional().describe("Optional. The message id you are answering (the `id` from list_recent/get_message). The reply joins that conversation thread and that letter is marked read. If omitted but the subject starts with \"Re:\" and there is exactly one recipient, the latest unread letter from that person with the same subject is used."),
       },
     },
     async ({ to, subject, body, signature, cc, bcc, replyTo, inReplyTo }) => {
       const recipients = resolveRecipients(to);
+      const ccRecipients = resolveRecipients(cc);
+      const bccRecipients = resolveRecipients(bcc);
       // 回信串线：AI 只给 Gmail 的 message id，这里替 ta 查出原信的 Message-ID / References / threadId
       let thread = {};
+      const currentRecipients = [recipients, ccRecipients, bccRecipients].filter(Boolean).join(", ");
+      const labelFor = (address) => { try { return publicMailContact(mailContacts, address).name; } catch { return "未备注笔友"; } };
+      // AI 回信常常不填 inReplyTo，只把标题写成「Re: 原标题」，结果原信一直挂着未读。没填时替 ta 认一次：
+      // 只有一个收件人、标题以 Re:/回复:/答复: 开头，就找这个人发来的、标题去掉前缀后一样的未读，取最新一封。
+      // 只认同一个人、同一个标题，不会把这人别的信一起标成已读。
+      let inferred = "", inferenceFailed = "";
+      if (!inReplyTo && !ccRecipients && !bccRecipients && looksLikeReply(subject)) {
+        const addrs = extractAddresses(recipients || "");
+        if (addrs.length === 1) {
+          try {
+            const target = await findUnreadReplyTarget(addrs[0], subject);
+            if (target) { inReplyTo = target.id; inferred = target.id; console.error(`[mail-mcp] 没填 inReplyTo，按标题认成回 ${target.id}`); }
+          } catch (e) {
+            inferenceFailed = "查未读失败：" + String(e?.message || e).slice(0, 80);
+            console.error(`[mail-mcp] 自动认回信失败（照常当新信寄）：${e?.message || e}`);
+          }
+        }
+      }
+      // 自动认到的那封不能用（收件人对不上、没有 Message-ID）就退回当新信寄；AI 自己填的 inReplyTo 出错，或者网络/服务器出错，照常报错
+      const dropInferred = (e) => {
+        if (!inferred || !isUnusableReplyTarget(e)) throw e;
+        const msg = String(e?.message || e);
+        console.error(`[mail-mcp] 自动认的回信 ${inferred} 对不上（${msg}），照常当新信寄`);
+        inferenceFailed = "认到的那封对不上：" + msg.slice(0, 80);
+        inReplyTo = ""; inferred = ""; thread = {};
+      };
+      const inferenceNote = () => ({ ...(inferred ? { inferredReplyTo: inferred } : {}), ...(inferenceFailed ? { replyInferenceFailed: inferenceFailed } : {}) });
       if (backend) {
-        if (inReplyTo) thread = await backend.replyHeaders(inReplyTo);
-        const cc2 = resolveRecipients(cc), bcc2 = resolveRecipients(bcc);
-        const raw = buildSimpleMessage({ from: MAIL_FROM, to: recipients, cc: cc2, bcc: bcc2, replyTo: resolveRecipients(replyTo), subject,
+        try {
+          if (inReplyTo) {
+            thread = await backend.replyHeaders(inReplyTo);
+            thread.correspondents = assertThreadRecipients(thread.headers, MAIL_USER, currentRecipients, labelFor);
+          }
+        } catch (e) { dropInferred(e); }
+        const raw = buildSimpleMessage({ from: MAIL_FROM, to: recipients, cc: ccRecipients, bcc: bccRecipients, replyTo: resolveRecipients(replyTo), subject,
           body: composeBody(body, signature), inReplyTo: thread.inReplyTo, references: thread.references, smtp: true });
-        const envelope = { from: MAIL_USER, to: [...new Set(extractAddresses([recipients, cc2, bcc2].filter(Boolean).join(", ")))] };
-        const res = await backend.sendRaw(raw, envelope, extractAddresses(recipients));
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ack: res.ack, id: res.id }, null, 2) }] };
+        const envelope = { from: MAIL_USER, to: [...new Set(extractAddresses(currentRecipients))] };
+        const res = await backend.sendRaw(raw, envelope, inReplyTo || null);
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, sent: true, archived: res.archived, acknowledged: res.acknowledged, ...inferenceNote(), id: res.id }, null, 2) }] };
       }
-      if (inReplyTo) {
-        if (!/^[a-zA-Z0-9_-]{1,128}$/.test(inReplyTo)) throw new Error("inReplyTo 要填 list_recent/get_message 给的 id");
-        const orig = await gmail.users.messages.get({ userId: "me", id: inReplyTo, format: "metadata", metadataHeaders: ["Message-ID", "References"] });
-        const h = {};
-        for (const x of orig.data.payload?.headers || []) h[x.name.toLowerCase()] = x.value;
-        if (!h["message-id"]) throw new Error("原信没有 Message-ID，没法串进同一个对话；去掉 inReplyTo 当新信寄，或换一封");
-        thread = { inReplyTo: h["message-id"], references: [h.references, h["message-id"]].filter(Boolean).join(" "), threadId: orig.data.threadId };
-      }
+      try {
+        if (inReplyTo) {
+          if (!/^[a-zA-Z0-9_-]{1,128}$/.test(inReplyTo)) throw new Error("inReplyTo 要填 list_recent/get_message 给的 id");
+          const orig = await gmail.users.messages.get({ userId: "me", id: inReplyTo, format: "metadata", metadataHeaders: ["Message-ID", "References", "From", "To", "Cc"] });
+          const h = headersObject(orig.data.payload);
+          if (!h["message-id"]) throw new Error("原信没有 Message-ID，没法串进同一个对话；去掉 inReplyTo 当新信寄，或换一封");
+          const correspondents = assertThreadRecipients(h, MAIL_USER, currentRecipients, labelFor);
+          thread = { inReplyTo: h["message-id"], references: [h.references, h["message-id"]].filter(Boolean).join(" "), threadId: orig.data.threadId, correspondents };
+        }
+      } catch (e) { dropInferred(e); }
       const raw = b64url(buildSimpleMessage({
         from: MAIL_FROM,
         to: recipients,
-        cc: resolveRecipients(cc),
-        bcc: resolveRecipients(bcc),
+        cc: ccRecipients,
+        bcc: bccRecipients,
         replyTo: resolveRecipients(replyTo),
         subject,
         body: composeBody(body, signature),
@@ -703,9 +732,9 @@ function createServer() {
         references: thread.references,
       }));
       const res = await gmail.users.messages.send({ userId: "me", requestBody: thread.threadId ? { raw, threadId: thread.threadId } : { raw } });
-      await archiveSentMessage(res.data.id);
-      const ack = await acknowledgeSentMail(recipients);
-      return { content: [{ type: "text", text: JSON.stringify({ ok: true, ack, id: res.data.id, threadId: res.data.threadId, labelIds: res.data.labelIds }, null, 2) }] };
+      const archived = await archiveSentMessage(res.data.id);
+      const acknowledged = inReplyTo ? await acknowledgeReply(inReplyTo, thread.correspondents || []) : null;
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, sent: true, archived, acknowledged, ...inferenceNote(), id: res.data.id, threadId: res.data.threadId, labelIds: res.data.labelIds }, null, 2) }] };
     }
   );
 
@@ -905,9 +934,13 @@ if (mode === "sse") {
     console.log(`[mail-mcp] account: ${MAIL_USER}`);
     console.log(`[mail-mcp] from:    ${MAIL_FROM}`);
     console.log(`[mail-mcp] proxy:   ${PROXY ? "configured" : "direct"}`);
-    // 本地存档只服务只读接口（给自己的网页按笔友分组看信、搜信）。没开只读接口就不存——Gmail 本身就有全部信件
+    // 常驻（SSE/HTTP）模式下 Gmail 本地存档始终开启：send_email 的 archived 回执靠它；MAIL_READ_TOKEN 只控制只读 HTTP 接口和会话索引。
+    // stdio 模式不开：每个会话各起一个进程，同时后台全量同步、同时写一份存档文件，会互相覆盖。
     if (MAIL_READ_TOKEN && !IS_GMAIL) console.error("[mail-mcp] 只读看信接口目前只支持 Gmail，这次没开");
-    else if (MAIL_READ_TOKEN) { startMailArchive(); warmConversationIndex(); }
+    if (IS_GMAIL) {
+      startMailArchive();
+      if (MAIL_READ_TOKEN) warmConversationIndex();
+    }
   });
 } else {
   const srv = createServer();

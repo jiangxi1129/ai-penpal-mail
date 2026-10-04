@@ -148,7 +148,10 @@ export function resolveMailContact(book, value) {
 }
 
 export function replaceMailAddresses(value, book) {
-  return String(value || "").replace(ADDRESSES, (match) => {
+  const normalized = String(value || "")
+    .replace(/&#(?:64|x0*40);/gi, "@")
+    .replace(/%40/gi, "@");
+  return normalized.replace(ADDRESSES, (match) => {
     const contact = book.contacts[normalizeMailAddress(match)];
     return contact?.name || "未备注邮箱";
   });

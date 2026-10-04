@@ -4,7 +4,8 @@
   "type": "module",
   "main": "mail-mcp.mjs",
   "scripts": {
-    "start": "node mail-mcp.mjs --sse"
+    "start": "node mail-mcp.mjs --sse",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

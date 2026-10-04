@@ -101,6 +101,31 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     });
   }
 
+  // 自动认回信用：在全部未读里从新到旧找「这个地址发来、标题对得上」的信，找到就停（只取信封，不会把信标成已读）。
+  // 不能只看收件箱最新几十封——别人的未读一多，要找的那封就被挤出去、悄悄漏掉。
+  // 最多翻 maxScan 封；翻到上限还没找到，回 truncated: true，让调用方明说「没翻完」，不假装「确实没有」。
+  async function findUnreadFrom(address, matchesSubject, maxScan = 1000) {
+    return withInbox(async (client, uv) => {
+      const want = String(address || "").toLowerCase();
+      const uids = ((await client.search({ seen: false }, { uid: true })) || []).sort((a, b) => b - a);
+      const limit = Math.min(uids.length, maxScan);
+      for (let i = 0; i < limit; i += 100) {
+        const batch = uids.slice(i, Math.min(i + 100, limit));
+        const found = [];
+        for await (const msg of client.fetch(batch, { envelope: true, flags: true, internalDate: true }, { uid: true })) {
+          const e = msg.envelope || {};
+          const fromAddrs = (e.from || []).map((a) => String(a.address || "").toLowerCase());
+          if (fromAddrs.includes(want) && matchesSubject(e.subject || "")) found.push(summary(msg, uv));
+        }
+        if (found.length) {
+          found.sort((a, b) => Number(b.internalDate) - Number(a.internalDate));
+          return { message: found[0], truncated: false, total: uids.length };
+        }
+      }
+      return { message: null, truncated: uids.length > maxScan, total: uids.length };
+    });
+  }
+
   // 读一封全文（读了就算已读，跟在邮箱里点开一样）
   async function readMessage(id) {
     const { uidValidity, uid } = parseId(id);
@@ -116,26 +141,31 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     }, { readOnly: false });
   }
 
-  // 回信要串进原来那封：查原信的 Message-ID / References
+  // 回信要串进原来那封：查原信的 Message-ID / References，也把参与者交给上层核对
   async function replyHeaders(id) {
     const { uidValidity, uid } = parseId(id);
     return withInbox(async (client, uv) => {
       checkValidity(uidValidity, uv);
-      const msg = await client.fetchOne(uid, { headers: ["message-id", "references"] }, { uid: true });
+      const msg = await client.fetchOne(uid, { headers: ["message-id", "references", "from", "to", "cc"] }, { uid: true });
       if (!msg) throw new Error("没找到 inReplyTo 那封原信");
       const h = msg.headers.toString();
       const get = (name) => (new RegExp(`^${name}:\\s*([\\s\\S]*?)(?=\\r?\\n\\S|$)`, "im").exec(h) || [])[1]?.replace(/\s+/g, " ").trim() || "";
       const mid = get("message-id");
       if (!mid) throw new Error("原信没有 Message-ID，没法串进同一个对话；去掉 inReplyTo 当新信寄");
-      return { inReplyTo: mid, references: [get("references"), mid].filter(Boolean).join(" ") };
+      return {
+        inReplyTo: mid,
+        references: [get("references"), mid].filter(Boolean).join(" "),
+        headers: { from: get("from"), to: get("to"), cc: get("cc") },
+      };
     });
   }
 
-  // 寄信：SMTP 寄出；之后用一个连接做完两件收尾：往「已发送」放一份（有的邮箱 SMTP 不会自动存），把这些收件人的未读来信标已读
-  async function sendRaw(rawMime, envelope, ackAddresses = []) {
+  // 寄信：SMTP 寄出；之后往「已发送」放一份，并且只把明确回复的那一个 UID 标已读
+  async function sendRaw(rawMime, envelope, ackId = null) {
     const info = await transport.sendMail({ envelope, raw: rawMime });
     if (!info.accepted || !info.accepted.length) throw new Error("对方服务器没收下：" + JSON.stringify(info.rejected || []));
-    let ack = false;
+    let archived = false;
+    let acknowledged = ackId ? false : null;
     try {
       await withClient(async (client) => {
         if (env.SAVE_SENT !== "false") {
@@ -153,24 +183,23 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
                 if (total && mid) for await (const m of client.fetch(`${Math.max(1, total - 9)}:*`, { envelope: true })) if (m.envelope?.messageId === mid) exists = true;
               } finally { lk.release(); }
               if (!exists) await client.append(sent.path, rawMime, ["\\Seen"]);
+              archived = true;
             }
           } catch (e) { console.error(`[mail-mcp] 已寄出，但往「已发送」放副本失败：${e?.message || e}`); }
         }
-        const lock = await client.getMailboxLock("INBOX");
-        try {
-          // 同上，163 不认 FROM 搜索：先拿全部未读，在这边按发件地址挑
-          const want = new Set(ackAddresses.map((a) => String(a).toLowerCase()));
-          const unseen = want.size ? ((await client.search({ seen: false }, { uid: true })) || []) : [];
-          const mark = [];
-          if (unseen.length) for await (const msg of client.fetch(unseen, { envelope: true }, { uid: true }))
-            if ((msg.envelope?.from || []).some((a) => want.has(String(a.address || "").toLowerCase()))) mark.push(msg.uid);
-          if (mark.length) await client.messageFlagsAdd(mark, ["\\Seen"], { uid: true });
-          ack = true;
-        } finally { lock.release(); }
+        if (ackId) {
+          const { uidValidity, uid } = parseId(ackId);
+          const lock = await client.getMailboxLock("INBOX");
+          try {
+            checkValidity(uidValidity, client.mailbox?.uidValidity);
+            await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
+            acknowledged = true;
+          } finally { lock.release(); }
+        }
       });
-    } catch (e) { console.error(`[mail-mcp] 已寄出，但寄后收尾（存已发送/清对方未读）失败：${e?.message || e}`); }
-    return { id: info.messageId || "", threadId: "", accepted: info.accepted, ack };
+    } catch (e) { console.error(`[mail-mcp] 已寄出，但寄后收尾（存已发送/确认原信）失败：${e?.message || e}`); }
+    return { id: info.messageId || "", threadId: "", accepted: info.accepted, archived, acknowledged };
   }
 
-  return { listMessageSummaries, readMessage, replyHeaders, sendRaw, describe: `${provider} · IMAP ${imapHost}:${imapPort} · SMTP ${smtpHost}:${smtpPort}` };
+  return { listMessageSummaries, findUnreadFrom, readMessage, replyHeaders, sendRaw, describe: `${provider} · IMAP ${imapHost}:${imapPort} · SMTP ${smtpHost}:${smtpPort}` };
 }

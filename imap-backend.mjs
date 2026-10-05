@@ -126,6 +126,29 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     });
   }
 
+  // 寄信前核对用：这个地址发来、还没读的信，从新到旧最多 max 封（只取信封，不会标成已读）。
+  // 不能让服务器按 FROM 筛：163/126 真机上 SUBJECT/FROM/BODY 搜索一律回空，会误判「这人没有未读」。
+  // 跟 findUnreadFrom 一样只搜全部未读，再从新到旧分批取信封、本地按完整发件地址筛；最多翻 maxScan 封，
+  // 翻到上限还没翻完就回 truncated: true，让上层明说「没翻完」，不假装「确实没有」。
+  async function listUnreadFrom(address, max = 10, maxScan = 1000) {
+    return withInbox(async (client, uv) => {
+      const want = String(address || "").toLowerCase();
+      const uids = ((await client.search({ seen: false }, { uid: true })) || []).sort((a, b) => b - a);
+      const limit = Math.min(uids.length, maxScan);
+      const out = [];
+      for (let i = 0; i < limit && out.length < max; i += 100) {
+        const batch = uids.slice(i, Math.min(i + 100, limit)), found = [];
+        for await (const msg of client.fetch(batch, { envelope: true, flags: true, internalDate: true }, { uid: true })) {
+          const fromAddrs = (msg.envelope?.from || []).map((a) => String(a.address || "").toLowerCase());
+          if (fromAddrs.includes(want)) found.push(summary(msg, uv));
+        }
+        found.sort((a, b) => Number(b.internalDate) - Number(a.internalDate));
+        out.push(...found.slice(0, max - out.length));
+      }
+      return { messages: out, more: out.length >= max, truncated: uids.length > maxScan };
+    });
+  }
+
   // 读一封全文（读了就算已读，跟在邮箱里点开一样）
   async function readMessage(id) {
     const { uidValidity, uid } = parseId(id);
@@ -146,16 +169,16 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     const { uidValidity, uid } = parseId(id);
     return withInbox(async (client, uv) => {
       checkValidity(uidValidity, uv);
-      const msg = await client.fetchOne(uid, { headers: ["message-id", "references", "from", "to", "cc"] }, { uid: true });
+      const msg = await client.fetchOne(uid, { headers: ["message-id", "references", "from", "to", "cc"], envelope: true }, { uid: true });
       if (!msg) throw new Error("没找到 inReplyTo 那封原信");
       const h = msg.headers.toString();
       const get = (name) => (new RegExp(`^${name}:\\s*([\\s\\S]*?)(?=\\r?\\n\\S|$)`, "im").exec(h) || [])[1]?.replace(/\s+/g, " ").trim() || "";
       const mid = get("message-id");
-      if (!mid) throw new Error("原信没有 Message-ID，没法串进同一个对话；去掉 inReplyTo 当新信寄");
+      // 没有 Message-ID 时不在这里报错：起了新标题另开一条线根本用不着它，要串线的时候由上层报
       return {
         inReplyTo: mid,
-        references: [get("references"), mid].filter(Boolean).join(" "),
-        headers: { from: get("from"), to: get("to"), cc: get("cc") },
+        references: mid ? [get("references"), mid].filter(Boolean).join(" ") : "",
+        headers: { from: get("from"), to: get("to"), cc: get("cc"), subject: msg.envelope?.subject || "" },   // 信封里的标题已经解过码
       };
     });
   }
@@ -201,5 +224,5 @@ export function createImapBackend({ provider, user, password, from, proxy, env =
     return { id: info.messageId || "", threadId: "", accepted: info.accepted, archived, acknowledged };
   }
 
-  return { listMessageSummaries, findUnreadFrom, readMessage, replyHeaders, sendRaw, describe: `${provider} · IMAP ${imapHost}:${imapPort} · SMTP ${smtpHost}:${smtpPort}` };
+  return { listMessageSummaries, findUnreadFrom, listUnreadFrom, readMessage, replyHeaders, sendRaw, describe: `${provider} · IMAP ${imapHost}:${imapPort} · SMTP ${smtpHost}:${smtpPort}` };
 }

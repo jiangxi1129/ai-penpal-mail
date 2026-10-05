@@ -44,6 +44,20 @@ export function looksLikeReply(subject) {
   return /^(re|回复|答复)\s*[:：]/i.test(normalizeSubject(subject)) && Boolean(replyBaseSubject(subject));
 }
 
+// 回信起了新标题（去掉 Re:/回复:/答复: 以后跟原信不一样）就另开一条线：不带 threadId / In-Reply-To / References，
+// 原信照样标成回过了。标题一样（「Re: 原标题」）才串进原来的对话。
+// 这里只剥回复前缀：「Fwd: 原标题」是转发，算新标题，另开一条线。
+const stripReplyPrefix = (value) => normalizeSubject(value).replace(/^((re|回复|答复)\s*[:：]\s*)+/i, "").trim();
+export function startsNewThread(subject, originalSubject) {
+  return stripReplyPrefix(subject) !== stripReplyPrefix(originalSubject);
+}
+
+// 对方信里的标题是不可信输入：要拼进给 AI 看的提示里时，去掉换行和控制字符、折叠空白、截到 max 字
+export function safeSubject(value, max = 120) {
+  const t = String(value || "").normalize("NFKC").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  return t ? (t.length > max ? t.slice(0, max) + "…" : t) : "（无标题）";
+}
+
 // candidates：[{ id, subject, internalDate }]，都是这个收件人发来的未读。挑标题对得上的最新一封，没有就 null。
 export function pickReplyTarget(candidates, subject) {
   const want = replyBaseSubject(subject);

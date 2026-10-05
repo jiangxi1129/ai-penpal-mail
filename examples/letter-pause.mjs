@@ -2,7 +2,8 @@
 //
 // 第一次 send_email 会被拦下，AI 拿到下面这张清单，自己对照着重读一遍，改完再寄就放行。
 // 清单写什么由人类定：保护隐私、别乱答应事、语气要求……写成你家需要的样子。
-// 同一封 = 同一收件人 + 同一标题（去掉 Re:），30 分钟内只拦一次。
+// 同一封 = 同一收件人 + 同一标题（去掉 Re:）。第一次拦，第二次放行。
+// 放行以后邮箱可能让 AI 补 inReplyTo / newLetter 再寄——去向变了就直接过；一字不改又调一次，可能是寄成了又重复寄，当新的一封照常拦。
 //
 // 下面是一份默认清单，偏隐私，按需改。
 const CHECKLIST = [
@@ -13,16 +14,19 @@ const CHECKLIST = [
 ];
 const WINDOW_MS = 30 * 60 * 1000;
 
-const SEEN = new Map();
+const SEEN = new Map();   // key → { at, passed, route }
 const norm = (s) => String(s || "").normalize("NFKC").trim().toLowerCase();
 export async function letterPause(input) {
   if (input?.tool_name !== "mcp__mail__send_email") return {};
-  const { to, subject } = input.tool_input || {};
+  const { to, subject, inReplyTo, newLetter } = input.tool_input || {};
   const key = String(to || "").split(",").map(norm).sort().join(",") + "|" + norm(subject).replace(/^(re:\s*)+/i, "").trim();
   const now = Date.now();
-  for (const [k, at] of SEEN) if (now - at > WINDOW_MS) SEEN.delete(k);
-  if (SEEN.has(key)) { SEEN.delete(key); return {}; }   // 第二次：放行
-  SEEN.set(key, now);
+  for (const [k, v] of SEEN) if (now - v.at > WINDOW_MS) SEEN.delete(k);
+  const reply = String(inReplyTo || "").trim(), route = `${reply}|${newLetter === true}`;
+  const st = SEEN.get(key);
+  if (st && !st.passed) { SEEN.set(key, { at: now, passed: true, route }); return {}; }   // 第二次：放行
+  if (st?.passed && route !== st.route && (reply || newLetter === true)) { st.route = route; st.at = now; return {}; }   // 照邮箱提示改了去向：放行
+  SEEN.set(key, { at: now, passed: false });
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny",
     permissionDecisionReason: ["[寄信前停一下] 还没寄出——这是固定的一步，不是出错。对照下面重读一遍，需要改就改，然后用同一个收件人和标题再寄：", ...CHECKLIST.map((x) => "- " + x)].join("\n") } };
 }
